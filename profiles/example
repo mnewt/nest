@@ -1,0 +1,28 @@
+#!/usr/bin/env sh
+
+# nets profile
+
+# cause this profile to be matched in the absence of other matching criteria
+# DEFAULT=true
+# name of Mac OS X Network Location
+LOCATION="Automatic"
+# 
+# 
+# name of Mac OS X VPN profile
+VPN="Work L2TP"
+# 
+# 
+# command line arguments to feed 'ssh' to invoke ssh tunnel
+SSH="ssh -f -N -C -c blowfish-cbc -D 1080 user@proxyhost.example.com -L 5000/localhost/5000"
+# 
+# 
+# matches the MAC address of any host on the Layer 2 network
+MACADDR="aa:bb:cc:dd:ee"
+# 
+# 
+# Wireless network ID to match
+SSID="Linksys"
+# 
+# 
+# Use growl notification
+GROWL=true

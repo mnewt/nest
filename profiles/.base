@@ -1,0 +1,221 @@
+#!/usr/bin/env sh
+
+# base profile
+#
+# cause this profile to be matched in the absence of other matching criteria
+# DEFAULT=true
+# 
+# 
+# name of Mac OS X Network Location
+# LOCATION="Automatic"
+# 
+# 
+# name of Mac OS X VPN profile
+# VPN="Work L2TP"
+# 
+# 
+# command line arguments to feed 'ssh' to invoke ssh tunnel
+# SSH="ssh -f -N -C -c blowfish-cbc -D 1080 user@proxyhost.example.com -L 5000/localhost/5000"
+# 
+# 
+# matches the MAC address of any host on the Layer 2 network
+# MACADDR="aa:bb:cc:dd:ee"
+# 
+# 
+# Wireless network ID to match
+# SSID="Linksys"
+# 
+# 
+# Use growl notification
+# GROWL=true
+
+###########################################################################
+# base functions; can be overridden in another profile if desired
+# 
+# You don't need to mess with anything below unless you want to get fancy
+# If you do want to get fancy, I suggest copying the relevant functions
+# out of this file and placing them in your own profile, overriding only
+# the functions that are different.
+###########################################################################
+
+# the auto function returns 0 (success) if the profile is a match or nonzero otherwise
+# profiles are searched in alphabetical order until the first one is matched
+auto() {
+  # search for a MAC address or SSID. if found, then we are on the network described in this profile
+  if [ -n "$MACADDR" ] && $(arp -na | grep -q "$MACADDR"); then
+    return 0
+  elif [ -n "$SSID" ] && $(/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -s | grep -q "$SSID"); then
+    return 0
+  else
+    return 1
+  fi
+}
+
+# determine if we have network connectivity, give some time for it to establish
+# return 0 (success) if connected, nonzero otherwise
+wait_for_net() {
+  local gateway=$(netstat -nr | awk '/default/ {print $2; exit}')
+  for (( i = 0; i < 5; i++ )); do
+    if ping -c 1 "$gateway" &> /dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+
+  # alternate method, in case ICMP requests and/or responses are blocked
+  # return curl -fIso /dev/null --retry 5 --retry-delay 1 --retry-max-time 10 www.google.com
+}
+
+# determine if we have SSH connectivity, give some time for it to establish
+# return 0 (success) if connected, nonzero otherwise
+wait_for_ssh() {
+  if [ -n "$1" ]; then
+    eval "$SSH"
+    for (( i = 0; i < 5; i++ )); do
+      if pgrep -qf "$1"; then
+        return 0
+      fi
+      sleep 1
+    done
+    return 1
+  fi
+}
+
+# Connects VPN. Does nothing if VPN is already connected
+# Takes one argument, the name of the VPN as from the Network Preferences / Network Services list
+vpn_connect() {
+  if [ -n "$1" ]; then
+    /usr/bin/env osascript >/dev/null <<EOF
+tell application "System Events"
+  tell current location of network preferences
+    set VPNservice to service "$1"
+    if exists VPNservice then connect VPNservice
+    repeat while (current configuration of VPNservice is not connected)
+      delay 0.1
+    end repeat
+  end tell
+end tell
+EOF
+  fi
+}
+
+# Disconnects VPN
+# Takes one argument, the name of the VPN from the Network Preferences / Network Services list
+vpn_disconnect() {
+  if [ -n "$1" ]; then
+    /usr/bin/env osascript >/dev/null <<EOF
+tell application "System Events"
+  tell current location of network preferences
+    set VPNservice to service "$1"
+    if exists VPNservice then disconnect VPNservice
+  end tell
+end tell
+EOF
+  fi
+}
+
+# Returns 0 (success) if VPN is connected, 1 (failure) if VPN is not connected
+# Takes one argument, the name of the VPN from the Network Preferences / Network Services list
+vpn_is_connected() {
+  if [ -n "$1" ]; then
+    local state=$(/usr/bin/env osascript <<EOF
+tell application "System Events"
+  tell current location of network preferences
+    set VPNservice to service "$1"
+    get connected of current configuration of VPNservice
+  end tell
+end tell
+EOF)
+    if [ "$state" == "true" ]; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# prints status of profile settings and daemon
+status() {
+  local location=$(networksetup -getcurrentlocation)
+  local ssid=$(/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -I | awk -F": " '/ SSID/ {print $2}')
+  local ipaddress=$(ifconfig | awk '/broadcast/ {print $2}')
+  local externalip=$(curl -s checkip.dyndns.org | grep -Eo '[0-9\.]+')
+  local proxy=$(networksetup -getsocksfirewallproxy "USB Ethernet" | awk -F': ' '/^Enabled/ {print $2}')
+  if [ -n "$VPN" ]; then
+    local vpn="$(VPN) $(if vpn_is_connected $VPN; then echo ' [connected]'; else echo ' [disconnected]'; fi)"
+  fi
+  if [ -n "$SSH" ]; then
+    local ssh="$(SSH) $(if pgrep -qf '$SSH'; then echo ' [connected]'; else echo ' [disconnected]'; fi)"
+  fi
+  local daemon=$(if [ -a $HOME/Library/LaunchAgents/$SELF.plist ]; then echo '[On]'; else echo '[Off]'; fi)
+
+  log_stdout "profile      :  $PROFILE"
+  log_stdout "location     :  $location"
+  log_stdout "SSID         :  $ssid"
+  log_stdout "IP address   :  $ipaddress"
+  log_stdout "external IP  :  $externalip"
+  log_stdout "proxy        :  [$proxy]"
+  log_stdout "VPN          :  $vpn"
+  log_stdout "SSH          :  $ssh"
+  log_stdout "daemon       :  $daemon"
+}
+
+# uses currently loaded profile to connect
+connect() {
+  # LOCATION
+  if [ -n "$LOCATION" ]; then
+    if scselect "$LOCATION" >/dev/null; then
+      log_verbose "Location: '$LOCATION' connected"
+    else
+      log_stdout "Location: '$LOCATION' FAILED to connect"
+    fi
+  fi
+
+  # network connectivity
+  if wait_for_net; then
+    log_verbose "Connected to network"
+  else
+    log_stdout "FAILED to connect to network. Aborting"
+    return 1
+  fi
+
+  # VPN
+  if [ -n "$VPN" ]; then
+    vpn_connect "$VPN"
+    if vpn_is_connected "$VPN"; then
+      log_verbose "VPN: '$VPN' connected"
+    else
+      log_stdout "VPN: '$VPN' FAILED to connect"
+    fi
+  fi
+
+  # SSH
+  if [ -n "$SSH" ]; then
+    if wait_for_ssh "$SSH"; then
+      log_verbose "SSH tunnel: '$SSH' connected"
+    else
+      log_stdout "SSH tunnel: '$SSH' FAILED to connect"
+    fi
+  fi
+
+  # growl notification
+  if [ -n "$GROWL" ] && which -s growlnotify; then
+    growlnotify -n "nest" -m "connected with profile: '$PROFILE'"
+  fi
+}
+
+# uses currently loaded profile to disconnect
+disconnect() {
+  vpn_disconnect "$VPN"
+  if [ -n "$SSH" ]; then
+    pkill -f "$SSH"
+  fi
+  if [ -n "$GROWL" ] && which -s growlnotify; then
+    growlnotify -n "nest" -m "disconnected from profile: '$PROFILE'"
+  fi
+}
+
+# uses currently loaded profile to reconnect
+reconnect() {
+  connect
+}

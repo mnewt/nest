@@ -1,0 +1,333 @@
+#!/usr/bin/env sh
+
+# program name
+SELF=$(basename $0)
+###########################################################################
+# usage
+###########################################################################
+#
+USAGE=$(cat <<EOF
+$SELF manages Mac OS X network connectivity
+it can set:
+ - location
+ - VPN
+ - SSH tunnel
+for most other settings, such as proxy or IP address, you can configure a location
+from the Mac OS X GUI and then have $SELF set the location for you.
+
+$SELF can also configure itself to run on any network connectivity even, enabling
+it to reconnect you to after events such as:
+ - resume from sleep
+ - startup
+ - connecting to a wireless or Ethernet network
+
+profiles are stored in '~/.nest/'
+
+Usage: 
+
+$SELF [-lv] [arguments]
+
+  $ $SELF -v                  # enable verbose logging to stdout (and logfile, if enabled)
+  $ $SELF -l logfile          # enable logging and log to specified file
+  $ $SELF                     # run without arguments to reconnect the active profile
+  $ $SELF <profile>           # activates profile (see example for what a profile looks like)
+  $ $SELF status              # prints status of profile, connectivity, and daemon
+  $ $SELF auto                # tries to auto detect which profile to enable
+  $ $SELF enable [arguments]  # enables launchd daemon, calls $SELF with arguments specified
+  $ $SELF disable             # removes launchd daemon
+  $ $SELF help                # prints this usage guide
+EOF)
+
+###########################################################################
+# support functions
+###########################################################################
+
+# log_verbose
+# if logging is enabled, writes arguments to logfile
+# 
+# arguments:
+#   text to log
+log_verbose() {
+  if [ "$LOGGING" == true ] && [ -n "$LOG_FILE" ]; then
+    echo "[$(date)]        $@" >> "$LOG_FILE"
+  fi
+  if [ "$VERBOSE" == true ]; then
+      echo 1>&2 "$@"
+  fi
+}
+
+# log_stdout
+# if logging is enabled, writes arguments to logfile, then sends text to stdout
+# 
+# arguments:
+#   text to log
+log_stdout() {
+  if [ "$LOGGING" == true ] && [ -n "$LOG_FILE" ]; then
+    echo "[$(date)]        $@" >> "$LOG_FILE"
+  fi
+  echo "$@"
+}
+
+# get_profile
+# given a profile name, searches the profiles in PROFILE_DIR for a match and
+# returns it if found
+# 
+# arguments:
+#   profile name (optional)
+# if profile is found:
+#   echo profile name
+#   return 0
+# else
+#   return 1
+get_profile() {
+  if [ -d "$PROFILE_DIR" ]; then
+    # see if argument given matches a profile
+    if [ -n "$1" ]; then
+      if [ -f "$PROFILE_DIR/$1" ]; then
+        echo "$1"
+        return 0
+      fi
+    else
+      # search PROFILE_DIR to find a match based on the auto() function or DEFAULT flag
+      local match=
+      for file in $(find -s "$PROFILE_DIR" -type f \( -iname "*" ! -iname ".*" \)); do
+        # if we were given an argument, see if that argument matches the filename
+        source "$file"
+        # see if auto() detects a match
+        if [ $(type -t auto) == "function" ] && auto; then
+          echo "$(basename $file)"
+          return 0
+        fi
+        # if the DEFAULT flag is set
+        if [ "$DEFAULT" == true ]; then
+          match="$(basename $file)"
+        fi
+      done
+      if [ -n "$match" ]; then
+        # no direct match found, but found a profile with the DEFAULT flag set
+        echo "$match"
+        return 0
+      fi
+    fi
+  fi
+  # no match found
+  return 1
+}
+
+# activate_profile
+# given a profile name, enables it and performs any necessary housekeeping
+# 
+# arguments:
+#   profile name
+# if profile is found:
+#   load the profile
+#   run connect routine
+#   return 0
+# else
+#   return 1
+activate_profile() {
+  if [ -e "$PROFILE_DIR/$1" ]; then
+    if [ -f "$PROFILE_DIR/.active" ]; then
+      if diff -q "$PROFILE_DIR/$1" "$PROFILE_DIR/.active" >/dev/null; then
+        source "$PROFILE_DIR/.base"
+        source "$PROFILE_DIR/.active"
+        log_verbose "Reconnecting profile '$1'..."
+        reconnect
+        return 0
+      else
+        source "$PROFILE_DIR/.base"
+        source "$PROFILE_DIR/.active"
+        log_verbose "Disconnecting profile '$1'..."
+        disconnect
+      fi
+    fi
+    log_verbose "Marking profile '$1' as active..."
+    cp -f "$PROFILE_DIR/$1" "$PROFILE_DIR/.active"
+    source "$PROFILE_DIR/.base"
+    source "$PROFILE_DIR/$1"
+    log_verbose "Connecting profile '$1'..."
+    connect
+    return 0
+  else
+    return 1
+  fi
+}
+
+
+###########################################################################
+# configuration
+###########################################################################
+# can be overridden in config file, 'nest.conf'
+# 
+# 
+# where nest stores profiles
+PROFILE_DIR="$HOME/.$SELF"
+# 
+# where nest lives
+INSTALL_DIR="/usr/local/$SELF"
+# 
+# etc config file
+ETC_CONFIG="/usr/local/etc/$SELF.conf"
+#
+# user config file
+USER_CONFIG="$HOME/.$SELF/.conf"
+# 
+# operation mode. planned feature; currently not used
+# MODE="auto"
+
+# source etc config file
+if [ -f "$ETC_CONFIG" ]; then
+  log_verbose "loading etc config file at: '$ETC_CONFIG'"
+  source "$ETC_CONFIG"
+fi
+# source user config file
+if [ -f "$USER_CONFIG" ]; then
+  log_verbose "loading user config file at: '$USER_CONFIG'"
+  source "$USER_CONFIG"
+fi
+
+# process flags
+while getopts "l:v" opts; do
+  case "$opts" in
+    "l")
+      LOGGING=true
+      if [ -n "$OPTARG" ]; then
+        LOG_FILE="$OPTARG"
+      fi
+      ;;
+    "v")
+      VERBOSE=true
+      ;;
+    [?])
+      log_stdout "Arguments were not recognized"
+      exit 64
+      ;;
+  esac
+done
+shift $(($OPTIND-1))
+
+
+###########################################################################
+# initial setup
+###########################################################################
+
+# make sure profile directory is set up; create if necessary
+if [ ! -d "$PROFILE_DIR" ]; then
+  log_verbose "$SELF is performing initial setup"
+  log_verbose "Creating $SELF profile directory at '$PROFILE_DIR'..."
+  mkdir "$PROFILE_DIR"
+fi
+if [ ! -f "$PROFILE_DIR/.base" ]; then
+  log_verbose "Creating 'base' profile in '$PROFILE_DIR/.base'..."
+  cp -f "$INSTALL_DIR/profiles/.base" "$PROFILE_DIR/.base"
+fi
+
+
+# load base profile with default functions
+
+source "$PROFILE_DIR/.base"
+
+
+###########################################################################
+# process arguments and act accordingly
+###########################################################################
+
+# log the command as it was run
+log_verbose "$0 $@"
+
+# process arguments
+if [ $# -eq 0 ]; then
+  if [ "$MODE" == "auto" ]; then
+    # add "auto" to list of arguments; in this case, the only argument
+    set -- "auto"
+  elif [ -f "$PROFILE_DIR/.active" ]; then
+    # no arguments, use active profile if available
+    activate_profile ".active"
+    exit 0
+  else
+    log_verbose "no arguments were specified and there is no active profile"
+    exit 64
+  fi
+fi
+if [ "$1" == "enable" ]; then
+  # create launchd file to run script on network connect
+  # set nest to run every time the network changes,
+  # and effectively on every system start or resume
+  # will get called with arguments specified after the enable keyword
+  # e.g. to have launchd run 'nest auto', type 'nest enable auto'
+  # 
+  # this mouthful copies the plist file from INSTALL_DIR to the user's LaunchAgents dir
+  # while replacing the placeholder "REPLACE_ME" text with the actual path and arguments
+  # of the command to be called, such as '/usr/local/nest/nest auto'
+  sed "s/REPLACE_ME/$(\
+    echo $INSTALL_DIR/$SELF ${@:2} | \
+    sed -e 's/[\/&]/\\&/g')/g" \
+    "$INSTALL_DIR/$SELF.plist" > "$HOME/Library/LaunchAgents/$SELF.plist"
+  launchctl load "$HOME/Library/LaunchAgents/$SELF.plist"
+  log_stdout "$SELF launchd agent loaded"
+  exit 0
+elif [ $# -eq 1 ]; then
+  case "$1" in
+
+    "status")
+      # print status report
+      if [ -f "$PROFILE_DIR/.active" ]; then
+        source "$PROFILE_DIR/.base"
+        source "$PROFILE_DIR/.active"
+      fi
+      status
+      exit 0
+      ;;
+
+    "list")
+      # list profiles
+      log_verbose "Listing available profiles..."
+      if [ -d "$PROFILE_DIR" ]; then
+        for file in $(find -s "$PROFILE_DIR" -type f \( -iname "*" ! -iname ".*" \)); do
+          log_stdout "$(basename $file)"
+        done
+      fi
+      exit 0
+      ;;
+
+    "auto")
+      # run auto() function from each profile, activate first match
+      # if no match is found but a default profile is available, activate that
+      log_verbose "Searching for a matching profile..."
+      if match=$(get_profile); then
+        log_verbose "Matched profile '$match'"
+        activate_profile "$match"
+        exit 0
+      else
+        log_verbose "no profiles match the current conditions"
+        exit 1
+      fi
+      ;;
+
+    "disable")
+      # disable and remove launchd file to no longer run nest on network connect
+      launchctl unload "$HOME/Library/LaunchAgents/$SELF.plist"
+      rm -f "$HOME/Library/LaunchAgents/$SELF.plist"
+      log_stdout "$SELF launchd agent unloaded"
+      exit 0
+      ;;
+
+    "help")
+      echo 1>&2 "$USAGE"
+      exit 0
+      ;;
+  esac
+  # no cases matched yet, look for profile files
+  # if first argument matches a file in PROFILE_DIR then load that profile
+  if [ -d "$PROFILE_DIR" ]; then
+    if activate_profile "$1"; then
+      exit 0
+    else
+      log_stdout "Could not find profile with name '$1'"
+      exit 1
+    fi
+  fi
+else
+  log_stdout "Arguments were not recognized"
+  exit 64
+fi

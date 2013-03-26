@@ -1,0 +1,68 @@
+#!/usr/bin/env sh
+
+# nets profile
+
+# cause this profile to be matched in the absence of other matching criteria
+# DEFAULT=true
+# 
+# 
+# name of Mac OS X Network Location
+LOCATION="JUSTIS"
+# 
+# 
+# name of Mac OS X VPN profile
+VPN="US California"
+# 
+# 
+# command line arguments to feed 'ssh' to invoke ssh tunnel
+# SSH="ssh -f -N -C -c blowfish-cbc -D 1080 user@proxyhost.example.com -L 5000/localhost/5000"
+# 
+# 
+# matches the MAC address of any host on the Layer 2 network
+MACADDR="aa:bb:cc:dd:ee:ff"
+# 
+# 
+# Wireless network ID to match
+SSID="CityHallWiFi"
+# 
+# 
+# Use growl notification
+# GROWL=true
+# 
+
+
+# Connects VPN. Does nothing if VPN is already connected
+# Takes one argument, the name of the VPN as from the Network Preferences / Network Services list
+vpn_connect() {
+  if [ -n "$1" ]; then
+    /usr/bin/env osascript >/dev/null <<EOF
+tell application "Viscosity" to connect (connections where name is "$1")
+EOF
+  fi
+}
+
+# Disconnects VPN
+# Takes one argument, the name of the VPN as from the Network Preferences / Network Services list
+vpn_disconnect() {
+  if [ -n "$1" ]; then
+    /usr/bin/env osascript >/dev/null <<EOF
+tell application "Viscosity" to disconnect (connections where name is "$1")
+EOF
+  fi
+}
+
+# Returns 0 (success) if VPN is connected, 1 (failure) if VPN is not connected
+# Takes one argument, the name of the VPN as from the Network Preferences / Network Services list
+vpn_is_connected() {
+  if [ -n "$1" ]; then
+    if pgrep "Viscosity"; then
+      /usr/bin/env osascript >/dev/null <<EOF
+tell application "Viscosity" to set state to state of connections where name is equal to "$1"
+EOF
+      if [ "$state" == "Connected" ]; then
+        return 0
+      fi
+    fi
+  fi
+  return 1
+}
